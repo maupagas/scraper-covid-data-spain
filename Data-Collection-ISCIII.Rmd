@@ -1,0 +1,166 @@
+---
+title: "COVID-19 Data Collection from Spain"
+author: "Mauricio Patón"
+date: "06/06/2021"
+output:
+      bookdown::html_document2:
+        fig_caption: yes
+        md_extensions: +footnotes
+        number_sections: true
+        toc: yes
+        toc_float: yes
+        theme: bootstrap
+        highlight: tango
+        css: styles.css
+always_allow_html: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Introduction
+
+To automate the process of gathering epidemiological data, an script is required to download the latest reports from RENAVE (Instituto Carlos III). In this document, it is explained the steps used to be able to achieve this goal.
+
+# Epidemological data from Spain
+
+- The data collected belongs to this [link](https://www.isciii.es/QueHacemos/Servicios/VigilanciaSaludPublicaRENAVE/EnfermedadesTransmisibles/Paginas/InformesCOVID-19.aspx).
+- The template used for estimation of fractions from Spain needs to be updated. Proposed to be in the [data-COVID-19 file](file:///C:\Users\Mauricio\OneDrive%20-%20ku.ac.ae\Mauricio%20(PDoc)\COVID-19%20work\data-COVID19-Spain.xlsx), in the *Renave-Total-Data* tab.
+- The data extracted can be saved in an Excel file that contains model information and it can be updated regularly.
+- The data reported now is from 22/6/2020 till 27/5/2021.
+- The reinfections do not appear very likely as of 27/5/2021 (2479 cases in which only 4% is confirmed)
+- Latest reports from RENAVE from the seroprevalence study include data from June 22nd. 
+
+> _Segundo periodo: Desde el 22 de junio hasta el 6 de diciembre de 2020, punto de inflexión de la incidencia acumulada (IA) a 14 días de casos de COVID-19, entre el segundo y el tercer periodo epidémico_
+
+## Data Extraction
+
+To start, the libraries required for the data scraping are loaded. There are several methods to do this, like using `pdftools` to read the pdf document provided. In this case we will use `tabulizer` to extract the tables from the document as it works directly with a provided URL. Then  `tidyverse` and `stringr` will be used to transform the data.
+
+```{r load-libraries}
+library(tidyverse)
+library(tabulizer)
+library(stringr)
+library(kableExtra)
+```
+
+Once the libraries are loaded, we can define the link that contains the PDF document and the title of the table that will be extracted. After defining the URL that contains the pdf, we can use `tabulizer` to extract all the tables into a variable in R as a _data.frame_. This takes a bit of time to be extracted:
+
+```{r extract-table-to-R}
+url <- "https://www.isciii.es/QueHacemos/Servicios/VigilanciaSaludPublicaRENAVE/EnfermedadesTransmisibles/Documents/INFORMES/Informes%20COVID-19/INFORMES%20COVID-19%202021/Informe%20n%C2%BA%2082%20Situaci%C3%B3n%20de%20COVID-19%20en%20Espa%C3%B1a%20a%209%20de%20junio%20de%202021.pdf"
+
+covid_table_ES <- extract_tables(url,
+                                 output = "data.frame")
+
+```
+
+## Identify table required
+
+Once all tables have been extracted, we need to find the desired table by looking at their headers. In this particular case, we want the data that has Age groups and Cases, Hospitalised and ICUs. We will identify such table by extracting the table that has as columns Age Groups and Hospitalized:
+
+```{r identify-table}
+# Get a counter for the number of tables extracted
+idT <- 1:length(covid_table_ES)
+
+# Identify the tables that have Hospitalized and data by age group
+id <- sapply(idT, function(i){
+  fdr <- any(colnames(covid_table_ES[[i]]) == "Hospitalizados1") &&                  
+            any(colnames(covid_table_ES[[i]]) == "Grupo.de.edad..años.")
+
+# Check if there is a match or not
+  if(fdr)
+  {
+    return(i)
+  }
+  else
+  {
+    return(0)
+  }
+})
+
+# Find Table Identifier
+table_id <- id[id != 0]
+
+
+```
+
+Once the table has been identified, we can assign it to a variable to store it as a data frame to work on. We will store the names of the columns as they will be also useful:
+```{r select-table}
+covid_data_AG_raw <- covid_table_ES[[table_id]]
+
+names_covid_data <- colnames(covid_data_AG_raw)
+
+covid_data_AG_raw %>%
+  knitr::kable(booktabs = T, escape = F, format.args = list(big.mark = ","),
+               caption = paste("Raw data extracted from ISCIII for COVID-19 cases seggregated by age group."),
+               align = 'c') %>%
+                                  # row_spec(0, bold=TRUE)
+                           kableExtra::kable_styling(c("striped","hover"), full_width = T) %>%
+                           column_spec(column = 1, extra_css = "position: absolute") %>%
+                           kableExtra::scroll_box(width = "100%", height = "100%", fixed_thead = T)
+```
+
+## Transform the table to generate a valid output
+
+The table needs still to be cleaned. Different steps need to be conducted:
+- Remove the empty row.
+- Separate percentages into new columns:    
+  - Separate and import value right away.
+  - Remove all the text after the first "(" and recalculate percentages in new columns.
+  
+```{r remove-row-and-create-new-names}
+# Remove  first row
+covid_data_AG <- covid_data_AG_raw[-1,]
+
+upd.names <- c("Hospitalised", "ICU", "Deaths")
+upd.perc.names <- paste0("%.",upd.names)
+```
+
+```{r separate-percentages-from-totals}
+
+# Option 1
+for (i in 1:3){
+  covid_data_AG <- covid_data_AG %>% separate(names_covid_data[i+2], 
+                                                 c(upd.names[i], upd.perc.names[i]), 
+                                                 sep = " ") 
+}
+
+# Remove parenthesis from columns and convert to numeric
+covid_data_AG[upd.perc.names] <- lapply(covid_data_AG[upd.perc.names], 
+                                         function(x){
+                                         x <- str_replace_all(x, pattern = "[()]", replacement = "")
+                                         as.numeric(str_replace(x, 
+                                          pattern = ",", 
+                                          replacement = "."))
+                                         }
+                                         )
+covid_data_final <- covid_data_AG
+
+# Convert to numeric data and rename first column
+covid_data_final <- lapply(covid_data_AG[,2:ncol(covid_data_AG)],  as.numeric) %>% as.data.frame()
+covid_data_final <- cbind(covid_data_AG[,1], covid_data_final)
+colnames(covid_data_final[1]) <- "Age Group"
+
+covid_data_final %>%
+  knitr::kable(booktabs = T, escape = F, format.args = list(big.mark = ","),
+               caption = paste("Raw data extracted from ISCIII for COVID-19 cases seggregated by age group."),
+               align = 'c',
+               col.names = c("Age Group", "Cases (n)", "Hospitalised (n)", "Hospitalised (%)",
+                             "ICU (n)", "ICU (% cases)", "Death (n)", "Death (% cases)")) %>%
+                                  # row_spec(0, bold=TRUE)
+                           kableExtra::kable_styling(c("striped","hover"), full_width = T) %>%
+                           column_spec(column = 1, extra_css = "position: absolute") %>%
+                           kableExtra::scroll_box(width = "100%", height = "100%", fixed_thead = T)
+```
+
+
+And that's it, the data has been extracted from the PDF. Lastly, we can saved the data to an Excel to load it in MATLAB for modelling purposes or for another particular use. We will use a list so we can include other pages in the future by adding new items if we wish to do so:
+
+```{r save-to-excel}
+# Save all the data into a excel file
+l <- list("Data.ISCII" = covid_data_final)
+openxlsx::write.xlsx(l, file = "data_COVID_Spain.xlsx", overwrite = T)
+```
+
+
